@@ -1,6 +1,7 @@
 import os
 import logging
 import threading
+import zlib
 
 from common import middleware, message_protocol, fruit_item
 
@@ -34,8 +35,13 @@ class AggregationSender:
             exchange.send(serialized)
 
     # Envia a aggregation el total acumulado de una fruta para un cliente.
+    # Cada fruta tiene un aggregator dueño. Usamos zlib para hashear y crc32
+    # (no criptografico ni aleatorio)
     def send_data(self, client_id, fruit, amount):
-        self._broadcast([internal.DATA, client_id, fruit, amount])
+        owner = zlib.crc32(fruit.encode("utf-8")) % AGGREGATION_AMOUNT
+        self.exchanges[owner].send(
+            internal.serialize([internal.DATA, client_id, fruit, amount])
+        )
 
     # La cantidad de registros originales que cubrio un hilo.
     def send_count(self, client_id, records):

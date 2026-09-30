@@ -1,4 +1,3 @@
-from pika import callback
 import os
 import heapq
 import logging
