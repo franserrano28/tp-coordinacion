@@ -1,6 +1,5 @@
 import os
 import logging
-import threading
 
 from common import middleware, message_protocol, fruit_item
 
@@ -24,32 +23,36 @@ class SumFilter:
                 MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{i}"]
             )
             self.data_output_exchanges.append(data_output_exchange)
-        self.amount_by_fruit = {}
 
-    def _process_data(self, fruit, amount):
-        logging.info(f"Process data")
-        self.amount_by_fruit[fruit] = self.amount_by_fruit.get(
+        self.amount_by_fruit_by_client = {}
+
+    # Obtiene el diccionario de frutas de un cliente, si no existe lo crea.
+    # Guarda el acumulado de una fruta para un cliente y le suma una cantidad nueva.
+    def _process_data(self, client_id, fruit, amount):
+        amount_by_fruit = self.amount_by_fruit_by_client.setdefault(client_id, {})
+        amount_by_fruit[fruit] = amount_by_fruit.get(
             fruit, fruit_item.FruitItem(fruit, 0)
         ) + fruit_item.FruitItem(fruit, int(amount))
 
-    def _process_eof(self):
-        logging.info(f"Broadcasting data messages")
-        for final_fruit_item in self.amount_by_fruit.values():
-            for data_output_exchange in self.data_output_exchanges:
-                data_output_exchange.send(
+    # El cliente envia EOF y sum le envia los totales a aggregation seguidos por el ID del cliente.
+    def _process_eof(self, client_id):
+        logging.info(f"EOF de {client_id}: enviando totales")
+        amount_by_fruit = self.amount_by_fruit_by_client.pop(client_id, {})
+        for fruit_item in amount_by_fruit.values():
+            for exchange in self.data_output_exchanges:
+                exchange.send(
                     message_protocol.internal.serialize(
-                        [final_fruit_item.fruit, final_fruit_item.amount]
+                        [client_id, fruit_item.fruit, fruit_item.amount]
                     )
                 )
 
-        logging.info(f"Broadcasting EOF message")
-        for data_output_exchange in self.data_output_exchanges:
-            data_output_exchange.send(message_protocol.internal.serialize([]))
+        for exchange in self.data_output_exchanges:
+            exchange.send(message_protocol.internal.serialize([client_id]))
 
-
+    # Procesa los mensajes recibidos por la cola de entrada y define si es de tipo dato o eof.
     def process_data_messsage(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
-        if len(fields) == 2:
+        if len(fields) == 3:
             self._process_data(*fields)
         else:
             self._process_eof(*fields)
@@ -57,6 +60,7 @@ class SumFilter:
 
     def start(self):
         self.input_queue.start_consuming(self.process_data_messsage)
+
 
 def main():
     logging.basicConfig(level=logging.INFO)
