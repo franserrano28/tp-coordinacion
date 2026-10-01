@@ -2,7 +2,7 @@ import os
 import heapq
 import logging
 
-from common import middleware, message_protocol, fruit_item
+from common import middleware, message_protocol, fruit_item, shutdown
 
 MOM_HOST = os.environ["MOM_HOST"]
 INPUT_QUEUE = os.environ["INPUT_QUEUE"]
@@ -57,7 +57,7 @@ class JoinFilter:
         pending = self.pending_by_client[client_id]
 
         if pending[0] == AGGREGATION_AMOUNT:
-            logging.info(f"Top final de {client_id}")
+            logging.info(f"Client {client_id} final top")
             self._process_eof(client_id)
 
         ack()
@@ -65,11 +65,21 @@ class JoinFilter:
     def start(self):
         self.input_queue.start_consuming(self.process_messsage)
 
+    def stop(self):
+        shutdown.stop_consuming_all(self.input_queue)
+
+    def close(self):
+        shutdown.close_all(self.input_queue, self.output_queue)
+
 
 def main():
     logging.basicConfig(level=logging.INFO)
     join_filter = JoinFilter()
-    join_filter.start()
+    shutdown.on_signal(join_filter.stop)
+    try:
+        join_filter.start()
+    finally:
+        join_filter.close()
 
     return 0
 

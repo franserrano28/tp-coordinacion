@@ -2,7 +2,7 @@ import os
 import heapq
 import logging
 
-from common import middleware, message_protocol, fruit_item
+from common import middleware, message_protocol, fruit_item, shutdown
 
 internal = message_protocol.internal
 
@@ -60,7 +60,7 @@ class AggregationFilter:
         if state.expected_records != state.records_covered:
             return
 
-        logging.info(f"Cliente {client_id} completo: calculando top parcial")
+        logging.info(f"Client {client_id} complete: calculating parcial top")
         del self.state_by_client[client_id]
         partial_top = heapq.nlargest(TOP_SIZE, state.fruits.values())
         self.output_queue.send(
@@ -85,11 +85,21 @@ class AggregationFilter:
     def start(self):
         self.input_exchange.start_consuming(self.process_messsage)
 
+    def stop(self):
+        shutdown.stop_consuming_all(self.input_exchange)
+
+    def close(self):
+        shutdown.close_all(self.input_exchange, self.output_queue)
+
 
 def main():
     logging.basicConfig(level=logging.INFO)
     aggregation_filter = AggregationFilter()
-    aggregation_filter.start()
+    shutdown.on_signal(aggregation_filter.stop)
+    try:
+        aggregation_filter.start()
+    finally:
+        aggregation_filter.close()
     return 0
 
 

@@ -3,7 +3,7 @@ import logging
 import threading
 import zlib
 
-from common import middleware, message_protocol, fruit_item
+from common import middleware, message_protocol, fruit_item, shutdown
 
 internal = message_protocol.internal
 
@@ -80,7 +80,13 @@ class SumFilter:
         self.control_publisher = middleware.MessageMiddlewareExchangeRabbitMQ(
             MOM_HOST, SUM_CONTROL_EXCHANGE, self._control_keys(range(SUM_AMOUNT))
         )
-        self.control_thread = threading.Thread(target=self._run_control, daemon=True)
+        # Conexiones que usa solo el hilo de control.
+        # Se crean aca para que stop() y close() puedan alcanzarlas.
+        self.control_sender = AggregationSender()
+        self.control_input = middleware.MessageMiddlewareExchangeRabbitMQ(
+            MOM_HOST, SUM_CONTROL_EXCHANGE, self._control_keys([ID])
+        )
+        self.control_thread = threading.Thread(target=self._run_control)
 
     # Construye las claves de control
     @staticmethod
@@ -109,7 +115,7 @@ class SumFilter:
 
     # Informa el total esperado al aggregation y avisa a todos los sum.
     def _process_eof(self, client_id, total_records):
-        logging.info(f"EOF de {client_id} ({total_records} registros)")
+        logging.info(f"EOF from {client_id} ({total_records} records)")
         self.aggregation_sender.send_total(client_id, total_records)
         self.control_publisher.send(internal.serialize([internal.FLUSH, client_id]))
 
@@ -122,34 +128,52 @@ class SumFilter:
             self._process_eof(*fields)
         ack()
 
-    # Cuando recibe un FLUSH marca al client como cerrado.
+    # Cuando recibe un FLUSH marca al client como cerrado y envia lo acumulado.
     def _run_control(self):
-        sender = AggregationSender()
-
-        # Este es un exchange solo de control
-        control_input = middleware.MessageMiddlewareExchangeRabbitMQ(
-            MOM_HOST, SUM_CONTROL_EXCHANGE, self._control_keys([ID])
-        )
-
         def process_control_message(message, ack, nack):
             kind, client_id = internal.deserialize(message)
             if kind == internal.FLUSH:
                 with self.lock:
                     self.closed_clients.add(client_id)
-                    self._flush(client_id, sender)
+                    self._flush(client_id, self.control_sender)
             ack()
 
-        control_input.start_consuming(process_control_message)
+        try:
+            self.control_input.start_consuming(process_control_message)
+        except Exception as e:
+            logging.error(f"Control thread failed: {e}")
 
     def start(self):
         self.control_thread.start()
-        self.input_queue.start_consuming(self.process_data_messsage)
+        try:
+            self.input_queue.start_consuming(self.process_data_messsage)
+        finally:
+            # Si el hilo principal termina (señal o error), frena y espera al
+            # de control para no dejarlo consumiendo con conexiones cerradas.
+            shutdown.stop_consuming_all(self.control_input)
+            self.control_thread.join()
+
+    def stop(self):
+        shutdown.stop_consuming_all(self.input_queue, self.control_input)
+
+    def close(self):
+        shutdown.close_all(
+            self.input_queue,
+            self.control_publisher,
+            self.control_input,
+            *self.aggregation_sender.exchanges,
+            *self.control_sender.exchanges,
+        )
 
 
 def main():
     logging.basicConfig(level=logging.INFO)
     sum_filter = SumFilter()
-    sum_filter.start()
+    shutdown.on_signal(sum_filter.stop)
+    try:
+        sum_filter.start()
+    finally:
+        sum_filter.close()
     return 0
 
 
